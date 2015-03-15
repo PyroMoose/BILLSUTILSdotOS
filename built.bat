@@ -3,7 +3,7 @@
 REM BILLSUTILSdotOS Boot Disk Assembler
 
 echo Assembling bootloader...
-nasm -O0 -f bin -o bootload.bin bootload.asm
+nasm -O0 -f bin -o bootloader.bin bootloader.asm
 
 echo Assembling kernel...
 nasm -O0 -f bin -o kernel.bin kernel.asm
@@ -21,7 +21,7 @@ partcopy ..\bootload.bin 0 200 BILLSUTILSdotOS.flp 0
 cd ..
 
 echo Mounting disk image...
-imdisk -a -f disk_images\mikeos.flp -s 1440K -m B:
+imdisk -a -f .\disk_images\BILLSUTILSdotOS.flp -s 1440K -m B:
 
 echo Copying kernel and applications to disk image...
 copy kernel.bin B:\
