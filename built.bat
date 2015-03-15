@@ -17,7 +17,7 @@ cd ..
 
 echo Adding bootsector to disk image...
 cd disk_images
-partcopy ..\bootload.bin 0 200 BILLSUTILSdotOS.flp 0
+msdos partcopy ..\bootload.bin 0 200 BILLSUTILSdotOS.flp 0
 cd ..
 
 echo Mounting disk image...
