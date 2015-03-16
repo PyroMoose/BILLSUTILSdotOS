@@ -1,6 +1,7 @@
 [BITS 16]
 
-jmp bootloader
+jmp short bootloader
+nop
 
 ;-------------------------------------------------------
 OEMLabel			db "        "
@@ -24,25 +25,34 @@ FileSystem			db "FAT12   "
 ;-------------------------------------------------------
 
 bootloader:
-	
+	cli
 	mov ax, 0x07c0
-	mov ds, ax
+	mov ds, ax ;Set Data Segment to 0x07c0
+	mov ax, [buffer]
+	add ax, 0x0200
+	mov ss, ax ;Set Stack Segment to 512 paragraphs ahead (8192 bytes)
+	mov ax, 0x0400
+	mov sp, ax ;Set Stack Pointer to 1024
+	sti
+	
+	mov [bootdevice], dl ;Save boot medium number
 	
 	mov al, 0x03
 	mov ah, 0x00
-	int 0x10 ;Clear Screen by setting VGA mode (80 x 25)
+	int 0x10 ;Reset VGA (80x25)
 	
-	mov ch, 0x00
-	mov cl, 0x07
-	mov ah, 0x01
-	int 0x10 ;Make cursor a blinking box
+	mov ah, 0x00
+	mov dl, 0x07
+	int 0x13 ;Seek to 0
 	
-	mov si, bootsplash
-	jmp printstring
-	
-	
-halt:
-	jmp halt
+testmemory:
+	mov si, [memcheck]
+	printstring
+	mov eax, 0x0000e820
+	int 0x15
+	jc bootfailed
+	test ax, ax
+	jc bootfailed
 	
 printstring:
 	mov ah, 0x0E
@@ -57,14 +67,23 @@ printstring:
 	.done:
 		ret
 
+bytetostring:
+	
+bootfailed:
+	mov si, [bootfailed_msg]
+	jmp printstring
+	jmp $
 ;-------------------------------------------------------
 ;----------------------VARIABLES-----------------------
 ;-------------------------------------------------------
-bootsplash		db "Booting BILLSUTILSdotOS...", 13, 10 ;String followed by CR and LF chars
 ;-------------------------------------------------------
-
+bootdevice db 0
+memcheck db "Checking for memory... ", 10, 13
+bootfailed_msg db "ERROR: System failed to boot", 10, 13
 ;-------------------------------------------------------
 ;-----------------------PADDING-------------------------
 ;-------------------------------------------------------
 times 510-($-$$) db 0
 dw 0xAA55
+
+buffer
