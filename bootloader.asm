@@ -66,7 +66,7 @@ readfloppy:
 	jnc search ;Find kernel if load successful
 	
 	mov ax, 0 ;Reset drive
-	mov dl, [bootdev] ;Our drive
+	mov dl, [bootdevice] ;Our drive
 	int 13h
 	jnc readfloppy ;Try again (Floppy is good, though)
 	jmp bootfailed ;Floppy causing error
