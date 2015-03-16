@@ -23,19 +23,46 @@ VolumeLabel			db "BILLSUTILS"
 FileSystem			db "FAT12   "
 ;-------------------------------------------------------
 
-db 0x00
-
 bootloader:
-
-mov ax, 0x07c0
-mov ds, ax
-mov ah, 0x00
-mov bh, 0x0F
-mov cx, 0x0000
-mov dx, 0x0000
-int 10h
+	
+	mov ax, 0x07c0
+	mov ds, ax
+	
+	mov al, 0x03
+	mov ah, 0x00
+	int 0x10 ;Clear Screen by setting VGA mode (80 x 25)
+	
+	mov ch, 0x00
+	mov cl, 0x07
+	mov ah, 0x01
+	int 0x10 ;Make cursor a blinking box
+	
+	mov si, bootsplash
+	jmp printstring
+	
+	
 halt:
-jmp halt
+	jmp halt
+	
+printstring:
+	mov ah, 0x0E
+	
+	.repeat:
+		lodsb
+		cmp al, 0
+		je .done
+		int 0x10
+		jmp short .repeat
+
+	.done:
+		ret
+
+;-------------------------------------------------------
+;----------------------VARIABLES-----------------------
+;-------------------------------------------------------
+bootsplash		db "Booting BILLSUTILSdotOS...", 13, 10 ;String followed by CR and LF chars
+;-------------------------------------------------------
+
 ;-------------------------------------------------------
 ;-----------------------PADDING-------------------------
 ;-------------------------------------------------------
