@@ -67,6 +67,7 @@ readfloppy:
 	
 	mov ax, 0 ;Reset drive
 	mov dl, [bootdevice] ;Our drive
+	stc
 	int 13h
 	jnc readfloppy ;Try again (Floppy is good, though)
 	jmp bootfailed ;Floppy causing error
@@ -96,12 +97,108 @@ nextrootfile:
 	jmp bootfailed ;No file found
 	
 filefound: ;Load Kernel into memory
-	jmp halt
+	mov ax, word[es:di+0x0f] ;Offset 11 + 15 = 26. Our first cluster
+	mov [cluster], ax
+	
+	mov ax, 1
+	call l2hts ;Convert 1st sector to HTS
+	
+	mov di, buffer
+	mov bx, di ;Now ES:BX points to our buffer
+	
+	mov ah, 2 ;Read
+	mov al, 9 ;9 sectors
+	pusha ;Quicksave
+	
+readfat: ;Let's retrieve the contents of KERNEL.BIN
+	popa ;Refresh our ah and al in case int 0x13 screws it up
+	pusha
+	stc
+	int 0x13
+	jnc fatread ;Past tense as we read it successfully
+	
+	mov ax, 0 ;Reset drive
+	mov dl, [bootdevice] ;Our drive
+	stc
+	int 0x13
+	jnc readfat ;Try again after floppy reset
+	
+fatread:
+	popa ;Let's not take up our whole stack :P
+	
+	mov ax, 0x0500 ;Kernel segment
+	mov es, ax ;Move extra segment there
+	mov bx, 0 ;We don't need an offset
+	
+	mov ah, 2 ;Set up for reading
+	mov al, 1 ;number of sectors to read
+	push ax ;We need to save this for later
+	
+loadtable:
+	mov ax, word[cluster]
+	add ax, 31 ;Starting offset
+	call l2hts ;Converty convertvert
+	
+	mov ax, 0x2000
+	mov es, ax
+	mov bx, word[pointer]
+	pop ax
+	push ax ;JIC int 0x13 loses it
+	
+	stc
+	int 0x13
+	jnc findnextcluster
+	mov ax, 0 ;Reset drive
+	mov dl, [bootdevice] ;Our drive
+	stc
+	int 0x13
+	jnc readfat ;Try again after floppy reset
+	jmp bootfailed
+	
+findnextcluster:
+	mov ax, [cluster]
+	mov dx, 0
+	mov bx, 3
+	mul bx ;Multiply cluster by 3
+	mov bx, 2
+	div bx ;Divide cluster by 2
+	mov si, buffer
+	add si, ax ;Add 2/3 cluster to buffer
+	mov ax, word [ds:si] ;Set ax to si value
+	
+	or dx, dx ;Check to see if remainder is even or odd
+	jz even ;Goto even if remainder is even. Else, goto odd
+	
+odd:
+	shr ax, 4 ;Shift out first 4 bits (they belong to another entry)
+	jmp findnextclustercont
+
+even:
+	and ax, 0FFFh ; Mask out final 4 bits and goto findnextclustercont
+
+findnextclustercont:
+	mov word[cluster], ax ;Store ax cluster value
+
+	cmp ax, 0FF8h ;FF8h is FAT12 EOF
+	jae bootkernel ;C'est la fin
+
+	add word[pointer], 512	 ;Move pointer ahead a cluster
+	jmp findnextcluster
+
+bootkernel:
+	pop ax ;Clean up stack
+	mov dl, byte [bootdevice] ;Pass bootdevice to kernel
+
+	jmp 0500h:0000h ;Execute kernel!
+	
+;-------------------------------------------------------
+;-----------------------FUNCTIONS-----------------------
+;-------------------------------------------------------
 
 bootfailed: ;Boot failing message and jmp loop
 	mov si, bootfailed_msg
 	jmp printstring
-	jmp halt
+	jmp $
 	
 printstring: ;Print whatever is in SI until NULL
 	mov ah, 0x0E
@@ -141,14 +238,13 @@ l2hts: ;LBA to HTS. ax = logical sector. OUTPUT is same for int 13h input
 	mov dl, [bootdevice]		; Set correct device
 
 	ret
-	
-halt:
-	jmp short halt
+
 ;-------------------------------------------------------
-;----------------------VARIABLES-----------------------
-;-------------------------------------------------------
+;-----------------------VARIABLES-----------------------
 ;-------------------------------------------------------
 bootdevice db 0
+cluster dw 0
+pointer dw 0
 kernelname db "KERNEL  BIN"
 bootfailed_msg db "ERROR: BILLSUTILSdotOS failed to boot", 10, 13
 ;-------------------------------------------------------
@@ -157,4 +253,4 @@ bootfailed_msg db "ERROR: BILLSUTILSdotOS failed to boot", 10, 13
 times 510-($-$$) db 0
 dw 0xAA55
 
-buffer:
+buffer: ;Buffer pointer
