@@ -1,5 +1,9 @@
 [BITS 16]
 
+;-------------BILLSUTILSdotOS Bootloader----------------
+;--------------Based on code in Mike OS-----------------
+;--------------Last Edited: 16/03/2015------------------
+
 jmp short bootloader
 nop
 
@@ -27,12 +31,12 @@ FileSystem			db "FAT12   "
 bootloader:
 	cli
 	mov ax, 0x07c0
-	mov ds, ax ;Set Data Segment to 0x07c0
+	mov ds, ax ;Set Data Segment to 0x07c0 (Where the BIOS loads us)
 	mov ax, buffer
 	add ax, 0x0200
 	mov ss, ax ;Set Stack Segment to 512 paragraphs ahead (8192 bytes) of disk buffer
 	mov ax, 0x0400
-	mov sp, ax ;Set Stack Pointer to 1024
+	mov sp, ax ;Set Stack Pointer to 1024 so we get 1024 bytes of stack
 	sti
 	
 	mov [bootdevice], dl ;Save boot medium number
@@ -45,25 +49,30 @@ bootloader:
 	int 0x13 ;Get drive parameters
 	jc bootfailed
 	and cx, 0x3f
-	mov [SectorsPerTrack], cx ;Now we know sectors per track
-	movzx dx, dh ;Set DX to DH
+	mov [SectorsPerTrack], cx ;Max sector number
+	movzx dx, dh ;Max head number
 	add dx, 1
 	mov [Sides], dx ;Total heads number
 	
 	mov ax, 19 ;Root dir
 	call l2hts ;Convert it to CHS
-
+	
 	mov si, buffer
 	mov bx, ds
 	mov es, bx
 	mov bx, si
 	pusha
-
-readfloppy:
+	
 	mov ah, 2 ;Read sectors into memory
 	mov al, 14 ;Read 14 sectors
-	int 13h
-	jnc search ;Find kernel if load successful
+	pusha
+	
+readfloppy:
+	popa
+	pusha
+	stc
+	int 13h ;This puts the entire root directory (It's entries) into the 8k buffer
+	jnc search
 	
 	mov ax, 0 ;Reset drive
 	mov dl, [bootdevice] ;Our drive
@@ -72,13 +81,13 @@ readfloppy:
 	jnc readfloppy ;Try again (Floppy is good, though)
 	jmp bootfailed ;Floppy causing error
 	
-search:
+search: ;Beginning to find the kernel entry
 	popa
 	mov ax, ds
 	mov es, ax ;Move Extra Segment to the Data Segment
 	mov di, buffer ;Now ES:DI is at our buffer
 	
-	mov cx, word[RootDirEntries] ;224 entries
+	mov cx, word[RootDirEntries] ;224 entries into counter
 	mov ax, 0 ;Offset 0
 	
 nextrootfile:
@@ -96,19 +105,20 @@ nextrootfile:
 	loop nextrootfile ;Loop, counting down until we have gone through all entries
 	jmp bootfailed ;No file found
 	
-filefound: ;Load Kernel into memory
-	mov ax, word[es:di+0x0f] ;Offset 11 + 15 = 26. Our first cluster
+filefound: ;Now that we know what file it is, let's go get it
+	mov ax, word[es:di]
+	add ax, 0x000f
 	mov [cluster], ax
 	
 	mov ax, 1
-	call l2hts ;Convert 1st sector to HTS
+	call l2hts ;Find HTS of first sector
 	
-	mov di, buffer
+	mov di, buffer ;Move data index to buffer start
 	mov bx, di ;Now ES:BX points to our buffer
 	
 	mov ah, 2 ;Read
 	mov al, 9 ;9 sectors
-	pusha ;Quicksave
+	pusha
 	
 readfat: ;Let's retrieve the contents of KERNEL.BIN
 	popa ;Refresh our ah and al in case int 0x13 screws it up
@@ -122,38 +132,38 @@ readfat: ;Let's retrieve the contents of KERNEL.BIN
 	stc
 	int 0x13
 	jnc readfat ;Try again after floppy reset
+	jmp bootfailed
 	
 fatread:
 	popa ;Let's not take up our whole stack :P
 	
-	mov ax, 0x0500 ;Kernel segment
+	mov ax, 0x2000 ;Kernel segment
 	mov es, ax ;Move extra segment there
-	mov bx, 0 ;We don't need an offset
+	mov bx, 0 ;Starting from the start, so we don't need an offset
 	
 	mov ah, 2 ;Set up for reading
-	mov al, 1 ;number of sectors to read
+	mov al, 1 ;Reading them one at a time
 	push ax ;We need to save this for later
 	
-loadtable:
+loadcluster: ;Ok we need the HTS of our first sector
 	mov ax, word[cluster]
 	add ax, 31 ;Starting offset
-	call l2hts ;Converty convertvert
+	call l2hts ;Turn into int 0x13 values
 	
 	mov ax, 0x2000
-	mov es, ax
+	mov es, ax ;Buffer segment
 	mov bx, word[pointer]
-	pop ax
-	push ax ;JIC int 0x13 loses it
+	pop ax ;Get kernel segment back
+	push ax ;Save it to stack JIC
 	
 	stc
-	int 0x13
+	int 0x13 ;Read the sector to memory
 	jnc findnextcluster
 	mov ax, 0 ;Reset drive
 	mov dl, [bootdevice] ;Our drive
 	stc
 	int 0x13
-	jnc readfat ;Try again after floppy reset
-	jmp bootfailed
+	jmp loadcluster
 	
 findnextcluster:
 	mov ax, [cluster]
@@ -162,9 +172,9 @@ findnextcluster:
 	mul bx ;Multiply cluster by 3
 	mov bx, 2
 	div bx ;Divide cluster by 2
-	mov si, buffer
-	add si, ax ;Add 2/3 cluster to buffer
-	mov ax, word [ds:si] ;Set ax to si value
+	mov si, buffer ;Set segment index to buffer address
+	add si, ax ;Add the offset for the 12 bit file entry
+	mov ax, word[ds:si] ;Set ax to si value
 	
 	or dx, dx ;Check to see if remainder is even or odd
 	jz even ;Goto even if remainder is even. Else, goto odd
@@ -174,33 +184,37 @@ odd:
 	jmp findnextclustercont
 
 even:
-	and ax, 0FFFh ; Mask out final 4 bits and goto findnextclustercont
+	and ax, 0x0fff ;Mask out final 4 bits and goto findnextclustercont
 
-findnextclustercont:
+findnextclustercont: ;Now that we have the Kernel cluster location, let's retrieve the actual kernel
 	mov word[cluster], ax ;Store ax cluster value
 
-	cmp ax, 0FF8h ;FF8h is FAT12 EOF
-	jae bootkernel ;C'est la fin
+	cmp ax, 0x0ff8 ;FF8h is FAT12 EOF
+	jmp bootkernel
 
-	add word[pointer], 512	 ;Move pointer ahead a cluster
-	jmp findnextcluster
+	add word[pointer], 512 ;Move pointer ahead a cluster
+	jmp loadcluster
 
 bootkernel:
 	pop ax ;Clean up stack
-	mov dl, byte [bootdevice] ;Pass bootdevice to kernel
-
-	jmp 0500h:0000h ;Execute kernel!
+	mov dl, byte[bootdevice] ;Pass bootdevice to kernel
+	
+	mov si, loadingkernel_msg
+	call printstring
+	
+	jmp 0x2000:0x0000 ;Jump to kernel at 0x2000:0x0000
 	
 ;-------------------------------------------------------
 ;-----------------------FUNCTIONS-----------------------
 ;-------------------------------------------------------
 
-bootfailed: ;Boot failing message and jmp loop
+bootfailed: ;Boot failed message and jmp loop
 	mov si, bootfailed_msg
 	jmp printstring
 	jmp $
 	
 printstring: ;Print whatever is in SI until NULL
+	pusha
 	mov ah, 0x0E
 	
 	.repeat:
@@ -211,12 +225,13 @@ printstring: ;Print whatever is in SI until NULL
 		jmp short .repeat
 
 	.done:
+		popa
 		ret
 	
 l2hts: ;LBA to HTS. ax = logical sector. OUTPUT is same for int 13h input
 	push bx
 	push ax
-
+	
 	mov bx, ax			; Save logical sector
 
 	mov dx, 0			; First the sector
@@ -247,6 +262,7 @@ cluster dw 0
 pointer dw 0
 kernelname db "KERNEL  BIN"
 bootfailed_msg db "ERROR: BILLSUTILSdotOS failed to boot", 10, 13
+loadingkernel_msg db "Loading BILLSUTILSdotOS Kernel...", 10, 13
 ;-------------------------------------------------------
 ;-----------------------PADDING-------------------------
 ;-------------------------------------------------------
