@@ -158,7 +158,7 @@ loadcluster: ;Ok we need the HTS of our first sector
 	
 	stc
 	int 0x13 ;Read the sector to memory
-	jnc findnextcluster
+	jc findnextcluster
 	mov ax, 0 ;Reset drive
 	mov dl, [bootdevice] ;Our drive
 	stc
@@ -202,7 +202,7 @@ bootkernel:
 	mov si, loadingkernel_msg
 	call printstring
 	
-	jmp 0x2000:0x0000 ;Jump to kernel at 0x2000:0x0000
+	jmp 0x0000:0x0000 ;Jump to kernel at 0x2000:0x0000
 	
 ;-------------------------------------------------------
 ;-----------------------FUNCTIONS-----------------------
@@ -262,7 +262,7 @@ cluster dw 0
 pointer dw 0
 kernelname db "KERNEL  BIN"
 bootfailed_msg db "ERROR: BILLSUTILSdotOS failed to boot", 10, 13
-loadingkernel_msg db "Loading BILLSUTILSdotOS Kernel...", 10, 13
+loadingkernel_msg db "Loading", 10, 13
 ;-------------------------------------------------------
 ;-----------------------PADDING-------------------------
 ;-------------------------------------------------------
