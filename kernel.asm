@@ -1,20 +1,37 @@
 [BITS 16]
 
-mov ax, 0x2000
-mov ds, ax
-mov si, [teststring]
+%DEFINE OS_VERSION "0.1"
+%DEFINE API_VERSION 1
 
-printstring:
-	mov ah, 0x0E
-	
-	.repeat:
-		lodsb
-		cmp al, 0
-		je halt
-		int 0x10
-		jmp short .repeat
+;%include "api\disk.asm" ;Disk utils
+%include "api\keyboard.asm" ;Keyboard functions
+;%include "api\misc.asm" ;Useful functions
+;%include "api\ports.asm" ;Serial port lib
+;%include "api\string.asm" ;String manip lib
+%include "api\display.asm" ;Display config and output
+;%include "api\sound.asm" ;Sound config and output
 
-halt:
-	jmp halt
+os_main:
+	cli
+	mov ax, 0
+	mov ss, ax
+	mov ax, 500h
+	mov sp, ax
+	sti
 	
-teststring db "WE HAVE LOADED THE KERNEL!", 13, 10, 0
+	cld
+	mov ax, 2000h
+	mov ds, ax
+	mov es, ax
+	mov fs, ax
+	mov gs, ax
+	
+	call os_get_vesa_info
+.repeat:
+	lodsb
+	cmp al, 0
+	je .done
+	mov ax, 0Eh
+	int 10h
+	jmp .repeat
+.done: jmp $
