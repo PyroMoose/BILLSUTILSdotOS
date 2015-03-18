@@ -29,209 +29,267 @@ FileSystem			db "FAT12   "
 ;-------------------------------------------------------
 
 bootloader:
-	cli
-	mov ax, 0x07c0
-	mov ds, ax ;Set Data Segment to 0x07c0 (Where the BIOS loads us)
-	mov ax, buffer
-	add ax, 0x0200
-	mov ss, ax ;Set Stack Segment to 512 paragraphs ahead (8192 bytes) of disk buffer
-	mov ax, 0x0400
-	mov sp, ax ;Set Stack Pointer to 1024 so we get 1024 bytes of stack
-	sti
-	
-	mov [bootdevice], dl ;Save boot medium number
-	
-	mov al, 0x03
-	mov ah, 0x00
-	int 0x10 ;Reset VGA (80x25)
-	
-	mov ah, 0x08
-	int 0x13 ;Get drive parameters
-	jc bootfailed
-	and cx, 0x3f
-	mov [SectorsPerTrack], cx ;Max sector number
-	movzx dx, dh ;Max head number
-	add dx, 1
-	mov [Sides], dx ;Total heads number
-	
-	mov ax, 19 ;Root dir
-	call l2hts ;Convert it to CHS
-	
-	mov si, buffer
+	mov ax, 07C0h			; Set up 4K of stack space above buffer
+	add ax, 544			; 8k buffer = 512 paragraphs + 32 paragraphs (loader)
+	cli				; Disable interrupts while changing stack
+	mov ss, ax
+	mov sp, 4096
+	sti				; Restore interrupts
+
+	mov ax, 07C0h			; Set data segment to where we're loaded
+	mov ds, ax
+
+	; NOTE: A few early BIOSes are reported to improperly set DL
+
+	cmp dl, 0
+	je no_change
+	mov [bootdev], dl		; Save boot device number
+	mov ah, 8			; Get drive parameters
+	int 13h
+	jc fatal_disk_error
+	and cx, 3Fh			; Maximum sector number
+	mov [SectorsPerTrack], cx	; Sector numbers start at 1
+	movzx dx, dh			; Maximum head number
+	add dx, 1			; Head numbers start at 0 - add 1 for total
+	mov [Sides], dx
+
+no_change:
+	mov eax, 0			; Needed for some older BIOSes
+
+
+; First, we need to load the root directory from the disk. Technical details:
+; Start of root = ReservedForBoot + NumberOfFats * SectorsPerFat = logical 19
+; Number of root = RootDirEntries * 32 bytes/entry / 512 bytes/sector = 14
+; Start of user data = (start of root) + (number of root) = logical 33
+
+floppy_ok:				; Ready to read first block of data
+	mov ax, 19			; Root dir starts at logical sector 19
+	call l2hts
+
+	mov si, buffer			; Set ES:BX to point to our buffer (see end of code)
 	mov bx, ds
 	mov es, bx
 	mov bx, si
+
+	mov ah, 2			; Params for int 13h: read floppy sectors
+	mov al, 14			; And read 14 of them
+
+	pusha				; Prepare to enter loop
+
+
+read_root_dir:
+	popa				; In case registers are altered by int 13h
 	pusha
-	
-	mov ah, 2 ;Read sectors into memory
-	mov al, 14 ;Read 14 sectors
-	pusha
-	
-readfloppy:
+
+	stc				; A few BIOSes do not set properly on error
+	int 13h				; Read sectors using BIOS
+
+	jnc search_dir			; If read went OK, skip ahead
+	call reset_floppy		; Otherwise, reset floppy controller and try again
+	jnc read_root_dir		; Floppy reset OK?
+
+	jmp reboot			; If not, fatal double error
+
+
+search_dir:
 	popa
+
+	mov ax, ds			; Root dir is now in [buffer]
+	mov es, ax			; Set DI to this info
+	mov di, buffer
+
+	mov cx, word [RootDirEntries]	; Search all (224) entries
+	mov ax, 0			; Searching at offset 0
+
+
+next_root_entry:
+	xchg cx, dx			; We use CX in the inner loop...
+
+	mov si, kern_filename		; Start searching for kernel filename
+	mov cx, 11
+	rep cmpsb
+	je found_file_to_load		; Pointer DI will be at offset 11
+
+	add ax, 32			; Bump searched entries by 1 (32 bytes per entry)
+
+	mov di, buffer			; Point to next entry
+	add di, ax
+
+	xchg dx, cx			; Get the original CX back
+	loop next_root_entry
+
+	mov si, file_not_found		; If kernel is not found, bail out
+	call print_string
+	jmp reboot
+
+
+found_file_to_load:			; Fetch cluster and load FAT into RAM
+	mov ax, word [es:di+0Fh]	; Offset 11 + 15 = 26, contains 1st cluster
+	mov word [cluster], ax
+
+	mov ax, 1			; Sector 1 = first sector of first FAT
+	call l2hts
+
+	mov di, buffer			; ES:BX points to our buffer
+	mov bx, di
+
+	mov ah, 2			; int 13h params: read (FAT) sectors
+	mov al, 9			; All 9 sectors of 1st FAT
+
+	pusha				; Prepare to enter loop
+
+
+read_fat:
+	popa				; In case registers are altered by int 13h
 	pusha
+
 	stc
-	int 13h ;This puts the entire root directory (It's entries) into the 8k buffer
-	jnc search
-	
-	mov ax, 0 ;Reset drive
-	mov dl, [bootdevice] ;Our drive
+	int 13h				; Read sectors using the BIOS
+
+	jnc read_fat_ok			; If read went OK, skip ahead
+	call reset_floppy		; Otherwise, reset floppy controller and try again
+	jnc read_fat			; Floppy reset OK?
+
+; ******************************************************************
+fatal_disk_error:
+; ******************************************************************
+	mov si, disk_error		; If not, print error message and reboot
+	call print_string
+	jmp reboot			; Fatal double error
+
+
+read_fat_ok:
+	popa
+
+	mov ax, 2000h			; Segment where we'll load the kernel
+	mov es, ax
+	mov bx, 0
+
+	mov ah, 2			; int 13h floppy read params
+	mov al, 1
+
+	push ax				; Save in case we (or int calls) lose it
+
+
+; Now we must load the FAT from the disk. Here's how we find out where it starts:
+; FAT cluster 0 = media descriptor = 0F0h
+; FAT cluster 1 = filler cluster = 0FFh
+; Cluster start = ((cluster number) - 2) * SectorsPerCluster + (start of user)
+;               = (cluster number) + 31
+
+load_file_sector:
+	mov ax, word [cluster]		; Convert sector to logical
+	add ax, 31
+
+	call l2hts			; Make appropriate params for int 13h
+
+	mov ax, 2000h			; Set buffer past what we've already read
+	mov es, ax
+	mov bx, word [pointer]
+
+	pop ax				; Save in case we (or int calls) lose it
+	push ax
+
 	stc
 	int 13h
-	jnc readfloppy ;Try again (Floppy is good, though)
-	jmp bootfailed ;Floppy causing error
-	
-search: ;Beginning to find the kernel entry
-	popa
-	mov ax, ds
-	mov es, ax ;Move Extra Segment to the Data Segment
-	mov di, buffer ;Now ES:DI is at our buffer
-	
-	mov cx, word[RootDirEntries] ;224 entries into counter
-	mov ax, 0 ;Offset 0
-	
-nextrootfile:
-	xchg cx, dx ;Move RootDirEntries to DX. CX is which file we are reading
-	mov si, kernelname
-	mov cx, 11 ;Number of characters (8.3 Filename has 11)
-	rep cmpsb ;Repeat compare 11 times
-	je filefound ;We found KERNEL.BIN
-	
-	add ax, 32 ;Else, Increment offset
-	mov di, buffer ;Point at buffer
-	add di, ax ;Add offset to buffer pointer
-	
-	xchg cx, dx ;Retrieve CX for loop counter
-	loop nextrootfile ;Loop, counting down until we have gone through all entries
-	jmp bootfailed ;No file found
-	
-filefound: ;Now that we know what file it is, let's go get it
-	mov ax, word[es:di]
-	add ax, 0x000f
-	mov [cluster], ax
-	
-	mov ax, 1
-	call l2hts ;Find HTS of first sector
-	
-	mov di, buffer ;Move data index to buffer start
-	mov bx, di ;Now ES:BX points to our buffer
-	
-	mov ah, 2 ;Read
-	mov al, 9 ;9 sectors
-	pusha
-	
-readfat: ;Let's retrieve the contents of KERNEL.BIN
-	popa ;Refresh our ah and al in case int 0x13 screws it up
-	pusha
-	stc
-	int 0x13
-	jnc fatread ;Past tense as we read it successfully
-	
-	mov ax, 0 ;Reset drive
-	mov dl, [bootdevice] ;Our drive
-	stc
-	int 0x13
-	jnc readfat ;Try again after floppy reset
-	jmp bootfailed
-	
-fatread:
-	popa ;Let's not take up our whole stack :P
-	
-	mov ax, 0x2000 ;Kernel segment
-	mov es, ax ;Move extra segment there
-	mov bx, 0 ;Starting from the start, so we don't need an offset
-	
-	mov ah, 2 ;Set up for reading
-	mov al, 1 ;Reading them one at a time
-	push ax ;We need to save this for later
-	
-loadcluster: ;Ok we need the HTS of our first sector
-	mov ax, word[cluster]
-	add ax, 31 ;Starting offset
-	call l2hts ;Turn into int 0x13 values
-	
-	mov ax, 0x2000
-	mov es, ax ;Buffer segment
-	mov bx, word[pointer]
-	pop ax ;Get kernel segment back
-	push ax ;Save it to stack JIC
-	
-	stc
-	int 0x13 ;Read the sector to memory
-	jc findnextcluster
-	mov ax, 0 ;Reset drive
-	mov dl, [bootdevice] ;Our drive
-	stc
-	int 0x13
-	jmp loadcluster
-	
-findnextcluster:
+
+	jnc calculate_next_cluster	; If there's no error...
+
+	call reset_floppy		; Otherwise, reset floppy and retry
+	jmp load_file_sector
+
+
+	; In the FAT, cluster values are stored in 12 bits, so we have to
+	; do a bit of maths to work out whether we're dealing with a byte
+	; and 4 bits of the next byte -- or the last 4 bits of one byte
+	; and then the subsequent byte!
+
+calculate_next_cluster:
 	mov ax, [cluster]
 	mov dx, 0
 	mov bx, 3
-	mul bx ;Multiply cluster by 3
+	mul bx
 	mov bx, 2
-	div bx ;Divide cluster by 2
-	mov si, buffer ;Set segment index to buffer address
-	add si, ax ;Add the offset for the 12 bit file entry
-	mov ax, word[ds:si] ;Set ax to si value
-	
-	or dx, dx ;Check to see if remainder is even or odd
-	jz even ;Goto even if remainder is even. Else, goto odd
-	
+	div bx				; DX = [cluster] mod 2
+	mov si, buffer
+	add si, ax			; AX = word in FAT for the 12 bit entry
+	mov ax, word [ds:si]
+
+	or dx, dx			; If DX = 0 [cluster] is even; if DX = 1 then it's odd
+
+	jz even				; If [cluster] is even, drop last 4 bits of word
+					; with next cluster; if odd, drop first 4 bits
+
 odd:
-	shr ax, 4 ;Shift out first 4 bits (they belong to another entry)
-	jmp findnextclustercont
+	shr ax, 4			; Shift out first 4 bits (they belong to another entry)
+	jmp short next_cluster_cont
+
 
 even:
-	and ax, 0x0fff ;Mask out final 4 bits and goto findnextclustercont
+	and ax, 0FFFh			; Mask out final 4 bits
 
-findnextclustercont: ;Now that we have the Kernel cluster location, let's retrieve the actual kernel
-	mov word[cluster], ax ;Store ax cluster value
 
-	cmp ax, 0x0ff8 ;FF8h is FAT12 EOF
-	jmp bootkernel
+next_cluster_cont:
+	mov word [cluster], ax		; Store cluster
 
-	add word[pointer], 512 ;Move pointer ahead a cluster
-	jmp loadcluster
+	cmp ax, 0FF8h			; FF8h = end of file marker in FAT12
+	jae end
 
-bootkernel:
-	pop ax ;Clean up stack
-	mov dl, byte[bootdevice] ;Pass bootdevice to kernel
-	
-	mov si, loadingkernel_msg
-	call printstring
-	
-	jmp 0x0000:0x0000 ;Jump to kernel at 0x2000:0x0000
-	
-;-------------------------------------------------------
-;-----------------------FUNCTIONS-----------------------
-;-------------------------------------------------------
+	add word [pointer], 512		; Increase buffer pointer 1 sector length
+	jmp load_file_sector
 
-bootfailed: ;Boot failed message and jmp loop
-	mov si, bootfailed_msg
-	jmp printstring
-	jmp $
-	
-printstring: ;Print whatever is in SI until NULL
+
+end:					; We've got the file to load!
+	pop ax				; Clean up the stack (AX was pushed earlier)
+	mov dl, byte [bootdev]		; Provide kernel with boot device info
+
+	jmp 2000h:0000h			; Jump to entry point of loaded kernel!
+
+
+; ------------------------------------------------------------------
+; BOOTLOADER SUBROUTINES, STRINGS AND POINTERS
+
+reboot:
+	mov ax, 0
+	int 16h				; Wait for keystroke
+	mov ax, 0
+	int 19h				; Reboot the system
+
+
+print_string:				; Output string in SI to screen
 	pusha
-	mov ah, 0x0E
-	
-	.repeat:
-		lodsb
-		cmp al, 0
-		je short .done
-		int 0x10
-		jmp short .repeat
 
-	.done:
-		popa
-		ret
-	
-l2hts: ;LBA to HTS. ax = logical sector. OUTPUT is same for int 13h input
+	mov ah, 0Eh			; int 10h teletype function
+
+.repeat:
+	lodsb				; Get char from string
+	cmp al, 0
+	je .done			; If char is zero, end of string
+	int 10h				; Otherwise, print it
+	jmp short .repeat
+
+.done:
+	popa
+	ret
+
+
+reset_floppy:		; IN: [bootdev] = boot device; OUT: carry set on error
+	push ax
+	push dx
+	mov ax, 0
+	mov dl, byte [bootdev]
+	stc
+	int 13h
+	pop dx
+	pop ax
+	ret
+
+
+l2hts:			; Calculate head, track and sector settings for int 13h
+			; IN: logical sector in AX, OUT: correct registers for int 13h
 	push bx
 	push ax
-	
+
 	mov bx, ax			; Save logical sector
 
 	mov dx, 0			; First the sector
@@ -250,23 +308,19 @@ l2hts: ;LBA to HTS. ax = logical sector. OUTPUT is same for int 13h input
 	pop ax
 	pop bx
 
-	mov dl, [bootdevice]		; Set correct device
+	mov dl, byte [bootdev]		; Set correct device
 
 	ret
 
-;-------------------------------------------------------
-;-----------------------VARIABLES-----------------------
-;-------------------------------------------------------
-bootdevice db 0
-cluster dw 0
-pointer dw 0
-kernelname db "KERNEL  BIN"
-bootfailed_msg db "ERROR: BILLSUTILSdotOS failed to boot", 10, 13
-loadingkernel_msg db "Loading", 10, 13
-;-------------------------------------------------------
-;-----------------------PADDING-------------------------
-;-------------------------------------------------------
-times 510-($-$$) db 0
-dw 0xAA55
 
-buffer: ;Buffer pointer
+	kern_filename	db "KERNEL  BIN"
+	disk_error	db "Floppy error! Press any key...", 0
+	file_not_found	db "KERNEL.BIN not found!", 0
+	bootdev		db 0
+	cluster		dw 0
+	pointer		dw 0
+
+	times 510-($-$$) db 0
+	dw 0AA55h
+
+buffer:

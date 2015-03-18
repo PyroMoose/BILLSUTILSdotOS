@@ -1,5 +1,7 @@
 [BITS 16]
 
+mov ax, 0x2000
+mov ds, ax
 mov si, [teststring]
 
 printstring:
@@ -15,4 +17,4 @@ printstring:
 halt:
 	jmp halt
 	
-teststring db "WE HAVE LOADED THE KERNEL!", 13, 10, 10
+teststring db "WE HAVE LOADED THE KERNEL!", 13, 10, 0
