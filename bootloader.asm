@@ -165,8 +165,7 @@ read_fat_ok:
 	mov es, ax
 	mov bx, 0
 
-	mov ah, 2			; int 13h floppy read params
-	mov al, 1
+	mov ax, 0201h
 
 	push ax				; Save in case we (or int calls) lose it
 
@@ -243,6 +242,8 @@ end:					; We've got the file to load!
 	pop ax				; Clean up the stack (AX was pushed earlier)
 	mov dl, byte [bootdev]		; Provide kernel with boot device info
 
+	mov ax, 0003h
+	int 10h
 	jmp 2000h:0000h			; Jump to entry point of loaded kernel!
 
 
@@ -315,7 +316,7 @@ l2hts:			; Calculate head, track and sector settings for int 13h
 
 	kern_filename	db "KERNEL  BIN"
 	disk_error	db "Floppy error! Press any key...", 0
-	file_not_found	db "KERNEL.BIN not found!", 0
+	file_not_found	db "KERNEL.BIN not found", 0
 	bootdev		db 0
 	cluster		dw 0
 	pointer		dw 0
