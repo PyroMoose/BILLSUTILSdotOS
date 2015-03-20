@@ -873,7 +873,7 @@ os_get_date_string:
 
 	mov ah, dl			; Always 2-digit day
 	call .add_2digits
-	jmp short .done
+	jmp .done
 
 .try_fmt1:
 	cmp bl, 1			; D/M/Y format (military and Europe)

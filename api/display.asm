@@ -90,6 +90,7 @@ os_get_vesa_mode_info:
 .WinBSegment dw 0
 .WinFuncPtr dd 0
 .BytesPerScanLine dw 0
+
 ;Resolution info
 .XResolution dw 0
 .YResolution dw 0
@@ -102,6 +103,7 @@ os_get_vesa_mode_info:
 .BankSize db 0
 .NumberOfImagePages db 0
 .Reserved db 0
+
 ;Colour info
 .RedMaskSize db 0
 .RedFieldPosition db 0
@@ -113,10 +115,57 @@ os_get_vesa_mode_info:
 .DirectColorModeInfo db 0
 .Reserved2 times 216 db 0
 
+; ------------------------------------------------------------------
+; os_vga_setup -- Set display to standard VGA 80x25 text
+; IN: Nothing; OUT: Nothing
 
+os_vga_setup:
+	pusha
+	
+	mov ax, 0003h
+	int 10h
+	mov ax, 0100h
+	mov cx, 2000h ;Invisible cursor
+	int 10h
+	
+	popa
+	ret
 
-; ==================================================================
+; ------------------------------------------------------------------
+; os_vga_printchar -- Print ASCII plaintext
+; IN: AL = ASCII code; OUT: Nothing
+;     AH = Scroll?
+
+os_vga_printchar:
+	pusha
+	
+	cmp ah, 0
+	je .noscroll
+	mov ah, 0Eh
+	jmp .scroll
+.noscroll:
+	mov ah, 0Ah
+.scroll:
+	int 10h
+	
+	popa
+	ret
+	
+; ------------------------------------------------------------------
+; os_vga_set_cursor -- Set cursor to a position
+; IN: DX = Row and Column; OUT: Nothing
+
+os_vga_set_cursor:
+	pusha
+	
+	mov ah, 02h
+	mov bh, 00h
+	int 10h
+	
+	popa
+	ret
+
+; ------------------------------------------------------------------
+; Display variables -- Data derived from VBE calls or lack thereof
 DisplayResoultionX dw 0
 DisplayResolutionY dw 0
-
-; ==================================================================
